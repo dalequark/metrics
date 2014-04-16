@@ -9,9 +9,8 @@ PROBEIP = IPAddr("1.2.3.4")
 TIMEOUT = 5
 PORT_START = 49152
 MAX_PORTS = 65535 - 49153 
-counter = 0
-
-
+PROBE_INTERVAL = 1
+data = "LALALAL HERE IS SOME FUNNNNNN DATA TO SEND HAR DAR DAR"
 class metrics(DynamicPolicy):
  
     def __init__(self): 
@@ -39,7 +38,8 @@ class metrics(DynamicPolicy):
         rp = Packet()
         dstmac = EthAddr("00:00:00:00:00:01")
         srcmac = dstmac   
-
+        rp.modify(switch=sourceSwitch)
+        rp.modify(outport=outport) 
         rp = rp.modify(switch=sourceSwitch)
         rp = rp.modify(inport=-1)
         rp = rp.modify(outport=outport)
@@ -48,13 +48,14 @@ class metrics(DynamicPolicy):
         rp = rp.modify(dstip=PROBEIP)
         rp = rp.modify(srcmac=srcmac) 
         rp = rp.modify(srcport=srcport)
-        rp = rp.modify(ethtype=TCP_TYPE)
-        rp = rp.modify(raw="")
+        rp = rp.modify(ethtype=IP_TYPE)
+        rp = rp.modify(raw=data)
         rp = rp.modify(protocol=1)
-        network.inject_packet(rp)    
+        self.network.inject_packet(rp)    
 
     def updatePolicy(self):
-        self.policy = if_(match(srcip = PROBEIP), self.metricsPolicy, self.macLearner)
+#        self.policy = if_(match(dstip= PROBEIP), self.query + self.metricsPolicy, self.macLearner)
+        self.policy = if_(match(dstip=PROBEIP), self.query, self.macLearner)
 
     def printPack(self,pkt):
         print pkt 
@@ -62,14 +63,15 @@ class metrics(DynamicPolicy):
     
     def probeAll(self):
         for switch in self.topology.nodes():
-            sendProbes(switch)
+            self.sendProbes(switch)
   
     def sendProbes(self, switch):
         if self.topology:
                 ports = [port for port in self.topology.node[switch]['ports']]
                 for port in ports:
                     if self.topology.node[switch]['ports'][port].linked_to != None:
-                            sendPacket(switch, port, switch+PORT_START) 
+                        print "sending probe from ", switch, " to ", port    
+                        self.sendPacket(switch, port, switch+PORT_START) 
     
 
     def switch_search(switchNum):
@@ -102,8 +104,8 @@ class metrics(DynamicPolicy):
 
         # restart the probing timer
         self.scheduler.empty()
-#        self.scheduler.enter(5, 1, sayHello,())
- #       self.scheduler.run()
+        self.scheduler.enter(PROBE_INTERVAL, 1, self.probeAll ,())
+        self.scheduler.run()
 '''
         with self.lock:
             if self.topology and (self.topology == network.topology):
