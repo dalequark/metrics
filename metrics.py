@@ -21,9 +21,9 @@ class metrics(DynamicPolicy):
     
         # Probing attributes
         self.topology = None
-        self.pendingResponses = None 
-
-
+        self.pendingResponses = None
+        #[srcSwitch][dstSwitch] = port on srcSwitch to get to dstSwitch 
+        self.switchToPort = None
         # Policies, callbacks, etc
         self.query = packets()
         self.query.register_callback(self.printPack) 
@@ -34,35 +34,47 @@ class metrics(DynamicPolicy):
         self.metricsPolicy = None
 
     def sendPacket(self, sourceSwitch, outport, srcport):
-        # port 2 of 1 is linked to port 2 of 2 
-        rp = Packet()
-        dstmac = EthAddr("00:00:00:00:00:01")
-        srcmac = dstmac   
-        rp.modify(switch=sourceSwitch)
-        rp.modify(outport=outport) 
-        rp = rp.modify(switch=sourceSwitch)
-        rp = rp.modify(inport=-1)
-        rp = rp.modify(outport=outport)
-        rp = rp.modify(srcip=IPAddr(PROBEIP))
-        rp = rp.modify(dstmac=dstmac)
-        rp = rp.modify(dstip=PROBEIP)
-        rp = rp.modify(srcmac=srcmac) 
-        rp = rp.modify(srcport=srcport)
-        rp = rp.modify(ethtype=IP_TYPE)
-        rp = rp.modify(raw=data)
-        rp = rp.modify(protocol=1)
-        self.network.inject_packet(rp)    
+            """Construct an arp packet from scratch and send"""
+            dstmac = EthAddr("00:00:00:00:00:02")
+            srcmac = dstmac   
+
+            rp = Packet()
+            rp = rp.modify(protocol=1)
+            rp = rp.modify(ethtype=ARP_TYPE)
+            rp = rp.modify(switch=sourceSwitch)
+            rp = rp.modify(inport=-1)
+            rp = rp.modify(outport=outport)
+            rp = rp.modify(srcip=PROBEIP)
+            rp = rp.modify(srcmac=srcmac)
+            rp = rp.modify(dstip=PROBEIP)
+            rp = rp.modify(dstmac=dstmac)
+            rp = rp.modify(raw='')
+
+            self.network.inject_packet(rp)
 
     def updatePolicy(self):
-#        self.policy = if_(match(dstip= PROBEIP), self.query + self.metricsPolicy, self.macLearner)
-        self.policy = if_(match(dstip=PROBEIP), self.query, self.macLearner)
+        self.policy = if_(match(dstip= PROBEIP), self.query + self.metricsPolicy, self.macLearner)
+        self.policy = self.query 
 
+    def registerProbe(self,pkt):
+        responderSwitch = pkt['switch']
+        proberSwitch = int(pkt['srcport']) - PORT_START
+        if self.pendingRequests[proberSwitch][responderSwitch] == None:
+            # Okay, this is the first packet that got to responSwitch from proberSwitch 
+            # How did it get to responSwitch? Directly or through an intermediary?
+            # Check to see what inport responSwitch got this packet on:
+            inPort = pkt['inport']
+            interSwitch = self.topology.node[responderSwitch]['ports'][inPort].linked_to
+            self.pendingRequests[proberSwitch][responderSwitch] = self.switchToPort[proberSwitch][interSwitch] 
+             
+        
     def printPack(self,pkt):
-        print pkt 
+        print pkt
 
-    
     def probeAll(self):
+        self.pendingResponses = {}
         for switch in self.topology.nodes():
+            self.pendingResponses[switch] = {}
             self.sendProbes(switch)
   
     def sendProbes(self, switch):
@@ -71,29 +83,36 @@ class metrics(DynamicPolicy):
                 for port in ports:
                     if self.topology.node[switch]['ports'][port].linked_to != None:
                         print "sending probe from ", switch, " to ", port    
+                        self.pendingResponses[switch][port] = None 
                         self.sendPacket(switch, port, switch+PORT_START) 
     
 
     def switch_search(switchNum):
         for port in self.topology.node[switchNum]['ports']:
             if port.linked_to != None:
+                
                 sendProbe() 
 
     def set_network(self, network):
         super(metrics,self).set_network(network)
+        self.pendingResponses = None
         self.topology = network.topology
+        self.switchToPort = {}
         if len(network.topology.nodes()) > MAX_PORTS:
            print "Could not do metrics, too many switches"
            return
         
         metrics_policy = identity
+
         # We install a rule at each switch
         for node in network.topology.nodes():
+            self.switchToPort[node] = {}
             thisPolicy = identity
             for port in self.topology.node[node]['ports']:
                 srcSwitch = self.topology.node[node]['ports'][port].linked_to
                 if not srcSwitch == None:
                     srcSwitch= int(srcSwitch.switch)
+                    self.switchToPort[node][srcSwitch] = port
                 # If this switch received this probe packet from source (because the srcport probe matched), then flood it, otherwise drop it. In any case, query it. 
                     thisPolicy = thisPolicy + match(switch = node) >> if_(match(srcport=PORT_START+srcSwitch), self.floodPolicy, self.dropPolicy) 
             thisPolicy = match(switch=node) >> thisPolicy
@@ -106,6 +125,7 @@ class metrics(DynamicPolicy):
         self.scheduler.empty()
         self.scheduler.enter(PROBE_INTERVAL, 1, self.probeAll ,())
         self.scheduler.run()
+
 '''
         with self.lock:
             if self.topology and (self.topology == network.topology):
@@ -136,6 +156,8 @@ class metrics(DynamicPolicy):
             print "Got a probe back!"
             #print "Got a probe back from " + int(pkt['switch']) 
 '''
+
+
 def main():
     print "Initializing ..."
     return metrics() 
