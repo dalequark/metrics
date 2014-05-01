@@ -12,7 +12,8 @@ baseip = "1.2.3."
 TIMEOUT = 5
 PROBE_INTERVAL = 3
 WHITE = 1
-BLACK = 2
+BLACK = 2 # note protocol is a 16-bit field
+VERBOSE = 1
 
 class metrics(DynamicPolicy):
  
@@ -41,7 +42,13 @@ class metrics(DynamicPolicy):
         self.macLearn = self.newIpQuery + mac_learner() 
         self.metricsPolicy = None
 	self.ipReroutePolicy = None	
-
+	self.testquery = packets()
+	if VERBOSE>0:
+		self.testquery.register_callback(self.test)
+	
+    def test(self, pkt):
+	print "Packet from ", pkt['srcip'], " to ", pkt['dstip'], " at ", pkt['switch']
+	
     def sendPacket(self, sourceSwitch, outport, dstip, color):
             """Construct an arp packet from scratch and send"""
             dstmac = EthAddr("00:00:00:00:00:02")
@@ -64,13 +71,14 @@ class metrics(DynamicPolicy):
 	switch = pkt['switch']
 	ip = pkt['srcip']
 	self.ipToSwitch[ip] = switch
-	print "Added ip ", ip	
+	#print "Added ip ", ip	
  
     def updatePolicy(self):
 	with self.lock:
 		probingPolicy = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
 		self.reroutingPolicy = None
 		# Create rules based on the entries in the pendingResponses Table
+		print self.pendingResponses
 		if self.pendingResponses:
 			for srcSwitch in self.pendingResponses:
 				thisSwitchRouting = None
@@ -85,13 +93,14 @@ class metrics(DynamicPolicy):
 					thisSwitchRouting = match(switch=srcSwitch) >> thisSwitchRouting
 					self.reroutingPolicy = thisSwitchRouting if not self.reroutingPolicy else self.reroutingPolicy + thisSwitchRouting
 			if self.reroutingPolicy:
-				self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.reroutingPolicy + self.macLearn)
+				self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reroutingPolicy + self.macLearn)
 				return
 		
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.macLearn)
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.macLearn)
 
     def registerProbe(self,pkt):
         with self.lock:
+		print "Probe had protocol", pkt['protocol']
                 responderSwitch = pkt['switch']
                 proberSwitch = int(str(pkt['dstip'])[6:])
 		# prevents against 1-cycle-old probes
@@ -113,7 +122,7 @@ class metrics(DynamicPolicy):
     def probeAll(self):
 	# We should update anything in the previous probe table because it's about to be wiped.
 	self.updatePolicy()
-        
+	print "sending probe"        
         color = self.currentColor
         self.currentColor = WHITE if color == BLACK else BLACK 
         
