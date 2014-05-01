@@ -10,7 +10,7 @@ import inspect
 PROBEIP = IPAddr("1.2.3.0")
 baseip = "1.2.3."
 TIMEOUT = 5
-PROBE_INTERVAL = 1
+PROBE_INTERVAL = 3
 WHITE = 1
 BLACK = 2
 
@@ -38,9 +38,9 @@ class metrics(DynamicPolicy):
         self.policy = mac_learner()
         self.floodPolicy = flood()
         self.dropPolicy = drop
-        self.arp = self.newIpQuery + mac_learner() 
+        self.macLearn = self.newIpQuery + mac_learner() 
         self.metricsPolicy = None
-	
+	self.ipReroutePolicy = None	
 
     def sendPacket(self, sourceSwitch, outport, dstip, color):
             """Construct an arp packet from scratch and send"""
@@ -67,8 +67,28 @@ class metrics(DynamicPolicy):
 	print "Added ip ", ip	
  
     def updatePolicy(self):
-        poly = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
-	self.policy = if_(match(srcip= PROBEIP), poly, self.arp) 
+	with self.lock:
+		probingPolicy = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
+		self.reroutingPolicy = None
+		# Create rules based on the entries in the pendingResponses Table
+		if self.pendingResponses:
+			for srcSwitch in self.pendingResponses:
+				thisSwitchRouting = None
+				for destSwitch in self.pendingResponses[srcSwitch]:
+					interSwitch = self.pendingResponses[srcSwitch][destSwitch]
+					#get all of the relevant ips destined for destSwitch
+					ips = [ip for ip in self.ipToSwitch if self.ipToSwitch[ip] == destSwitch]
+					for ip in ips:
+						newRule = match(dstip=ip) >> fwd(interSwitch)
+						thisSwitchRouting = newRule if not thisSwitchRouting else thisSwitchRouting + newRule
+				if thisSwitchRouting:
+					thisSwitchRouting = match(switch=srcSwitch) >> thisSwitchRouting
+					self.reroutingPolicy = thisSwitchRouting if not self.reroutingPolicy else self.reroutingPolicy + thisSwitchRouting
+			if self.reroutingPolicy:
+				self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.reroutingPolicy + self.macLearn)
+				return
+		
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.macLearn)
 
     def registerProbe(self,pkt):
         with self.lock:
@@ -89,16 +109,10 @@ class metrics(DynamicPolicy):
                         self.pendingResponses[proberSwitch][responderSwitch] = self.switchToPort[proberSwitch][responderSwitch]
                     else:
                         self.pendingResponses[proberSwitch][responderSwitch] = self.switchToPort[proberSwitch][interSwitch] 
-                    #if proberSwitch == 1:
-		#	print "Best route from ", proberSwitch, " to ", responderSwitch, " was through ", interSwitch
 
-		    # SHIP IT
-		    # Update flow table with this route
-		    # The best way to get to responderSwitch from proberSwitch 
-	            # get all IP's connected to responderSwitch
-		    relevantIps = [ip for ip in self.ipToSwitch if self.ipToSwitch[ip] == responderSwitch]
-		    newPolicy = match(switch = proberSwitch) 
     def probeAll(self):
+	# We should update anything in the previous probe table because it's about to be wiped.
+	self.updatePolicy()
         
         color = self.currentColor
         self.currentColor = WHITE if color == BLACK else BLACK 
@@ -116,6 +130,7 @@ class metrics(DynamicPolicy):
 
     def sendProbes(self, switch):
         if self.topology:
+
 		self.setPendingDict(switch)
                 ports = [port for port in self.topology.node[switch]['ports']]
                 for port in ports:
