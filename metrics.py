@@ -25,18 +25,23 @@ class metrics(DynamicPolicy):
         self.pendingResponses = None
         self.timer = None
         self.lock = threading.Lock()
-        # rather than use sequence number, we use alternating black/white
+        self.ipToSwitch = {} 
+	# rather than use sequence number, we use alternating black/white
         # packets, where this is the packet 'protocol'
         self.currentColor = WHITE
         self.switchToPort = None
         # Policies, callbacks, etc
-        self.query = packets()
+        self.newIpQuery = packets(1,['srcip'])
+	self.newIpQuery.register_callback(self.registerIp)
+	self.query = packets()
         self.query.register_callback(self.registerProbe) 
         self.policy = mac_learner()
         self.floodPolicy = flood()
         self.dropPolicy = drop
-        self.arp = mac_learner() 
+        self.arp = self.newIpQuery + mac_learner() 
         self.metricsPolicy = None
+	
+
     def sendPacket(self, sourceSwitch, outport, dstip, color):
             """Construct an arp packet from scratch and send"""
             dstmac = EthAddr("00:00:00:00:00:02")
@@ -53,7 +58,14 @@ class metrics(DynamicPolicy):
             rp = rp.modify(dstmac=dstmac)
             rp = rp.modify(raw='')
             self.network.inject_packet(rp)
-    
+
+    #Figure out what switch each ip corresponds to (so we can route based on switches)
+    def registerIp(self, pkt):
+	switch = pkt['switch']
+	ip = pkt['srcip']
+	self.ipToSwitch[ip] = switch
+	print "Added ip ", ip	
+ 
     def updatePolicy(self):
         poly = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
 	self.policy = if_(match(srcip= PROBEIP), poly, self.arp) 
@@ -82,7 +94,10 @@ class metrics(DynamicPolicy):
 
 		    # SHIP IT
 		    # Update flow table with this route
-	 
+		    # The best way to get to responderSwitch from proberSwitch 
+	            # get all IP's connected to responderSwitch
+		    relevantIps = [ip for ip in self.ipToSwitch if self.ipToSwitch[ip] == responderSwitch]
+		    newPolicy = match(switch = proberSwitch) 
     def probeAll(self):
         
         color = self.currentColor
@@ -115,6 +130,7 @@ class metrics(DynamicPolicy):
 
     def set_network(self, network):
         super(metrics,self).set_network(network)
+	
 	self.network = network       
         if self.timer:
             self.timer.cancel()
