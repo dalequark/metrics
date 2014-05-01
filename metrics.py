@@ -20,6 +20,7 @@ class metrics(DynamicPolicy):
         super(metrics,self).__init__()
 
         # Probing attributes
+	self.network = None
         self.topology = None
         self.pendingResponses = None
         self.timer = None
@@ -36,7 +37,6 @@ class metrics(DynamicPolicy):
         self.dropPolicy = drop
         self.arp = mac_learner() 
         self.metricsPolicy = None
-
     def sendPacket(self, sourceSwitch, outport, dstip, color):
             """Construct an arp packet from scratch and send"""
             dstmac = EthAddr("00:00:00:00:00:02")
@@ -55,14 +55,14 @@ class metrics(DynamicPolicy):
             self.network.inject_packet(rp)
     
     def updatePolicy(self):
-        self.policy =if_(match(srcip= PROBEIP), self.query + self.metricsPolicy, self.arp) 
-        #self.policy = if_(match(srcip= PROBEIP), self.query, self.arp) 
+        poly = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
+	self.policy = if_(match(srcip= PROBEIP), poly, self.arp) 
 
     def registerProbe(self,pkt):
         with self.lock:
                 responderSwitch = pkt['switch']
                 proberSwitch = int(str(pkt['dstip'])[6:])
-
+		# prevents against 1-cycle-old probes
                 if not pkt['protocol'] == self.currentColor:
                     pass
                 elif not responderSwitch in self.pendingResponses[proberSwitch]:
@@ -77,8 +77,12 @@ class metrics(DynamicPolicy):
                         self.pendingResponses[proberSwitch][responderSwitch] = self.switchToPort[proberSwitch][responderSwitch]
                     else:
                         self.pendingResponses[proberSwitch][responderSwitch] = self.switchToPort[proberSwitch][interSwitch] 
-                    #print "Best route from ", proberSwitch, " to ", responderSwitch, " was through ", interSwitch
-        
+                    #if proberSwitch == 1:
+		#	print "Best route from ", proberSwitch, " to ", responderSwitch, " was through ", interSwitch
+
+		    # SHIP IT
+		    # Update flow table with this route
+	 
     def probeAll(self):
         
         color = self.currentColor
@@ -97,16 +101,21 @@ class metrics(DynamicPolicy):
 
     def sendProbes(self, switch):
         if self.topology:
+		self.setPendingDict(switch)
                 ports = [port for port in self.topology.node[switch]['ports']]
                 for port in ports:
                     connectedSwitch = self.topology.node[switch]['ports'][port].linked_to
                     if connectedSwitch != None:
-                        self.pendingResponses[switch][connectedSwitch] = None 
                         self.sendPacket(switch, port, IPAddr(baseip+str(switch)), self.currentColor)
+
+    def setPendingDict(self,switch):
+	for node in self.topology.nodes():
+		if switch != node:
+			self.pendingResponses[switch] = {}
 
     def set_network(self, network):
         super(metrics,self).set_network(network)
-       
+	self.network = network       
         if self.timer:
             self.timer.cancel()
          
@@ -114,29 +123,36 @@ class metrics(DynamicPolicy):
         self.topology = network.topology
         self.switchToPort = {}
         
-        metrics_policy = identity
+        metrics_policy = None 
 
         # We install a rule at each switch
         for node in network.topology.nodes():
-            self.switchToPort[node] = {}
-            thisPolicy = identity
+            thisPolicy = None
+	    self.switchToPort[node] = {}
             for port in self.topology.node[node]['ports']:
-                srcSwitch = self.topology.node[node]['ports'][port].linked_to
+                #srcSwitch is the switch from which node receieves data on port
+		srcSwitch = self.topology.node[node]['ports'][port].linked_to
                 if not srcSwitch == None:
                     srcSwitch= int(srcSwitch.switch)
                     self.switchToPort[node][srcSwitch] = port
                 # If this switch received this probe packet from source (because the srcport probe matched), then flood it, otherwise drop it. In any case, query it.
-                    matchCondition = match(dstip=IPAddr(baseip+str(srcSwitch)) ) & match(srcport = port) 
-                    thisPolicy = thisPolicy + (match(switch = node) >> if_(matchCondition, self.floodPolicy, self.dropPolicy))
-            metrics_policy = metrics_policy + thisPolicy
+                    matchCondition = match(dstip=IPAddr(baseip+str(srcSwitch)) ) & match(inport = port) 
+		    if thisPolicy:
+		    	thisPolicy = thisPolicy +if_(match(switch=node) & matchCondition, self.floodPolicy, self.dropPolicy) 
+		    else:
+			thisPolicy = if_(match(switch=node) & matchCondition, self.floodPolicy, self.dropPolicy)
+	    if metrics_policy:
+            	metrics_policy = metrics_policy + thisPolicy
+            else:
+		metrics_policy = thisPolicy
 
-        self.metricsPolicy = metrics_policy       
+        self.metricsPolicy = metrics_policy      
         self.updatePolicy()
         # restart the probing timer
         self.timer = Timer(PROBE_INTERVAL, self.probeAll)
         self.timer.start()    
 
 def main():
-    print "Initializing ..."
+    print "RInitializing ..."
     return metrics() 
 
