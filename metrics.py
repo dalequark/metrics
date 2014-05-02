@@ -83,55 +83,30 @@ class metrics(DynamicPolicy):
 	print "Updating policy..."
 	probingPolicy = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
 	# Create rules based on the entries in the pendingResponses Table
-	if self.reRoutingPolicy and self.inverseRoutingPolicy:	
-		#self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy >> self.macLearn)
-		#print "Inv ", self.inverseRoutingPolicy
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy + (self.inverseRoutingPolicy  >> self.metricsPolicy))
+	if self.reRoutingPolicy:
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + (self.reRoutingPolicy >> self.macLearn))
+		#self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + (self.reRoutingPolicy >> self.metricsPolicy))
 	else:
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.metricsPolicy)
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.macLearn)
 
 
     def updateReRoutingPolicy(self):
-	thisPolicy = None
-	# Let macLearner only catch things that are not caught by the routing policy
-	invPolicy = None
-	#print "Updating reroute ... loger is ... ", self.logger
 
-	# This is used for creating inverse rules (i.e. filter everything we haven't made rules for (i.e. due to not knowing IP)
-	# to macLearner. switchPol keeps track of which switches we have set rules for
-	switchPol = {}
+	thisPolicy = identity
 
 	for pair in self.logger.switchPairs:
 		pair = self.logger.switchPairs[pair]
 		inSwitch = pair.inSwitch
 		outSwitch = pair.outSwitch
 		bestPort = pair.bestPort
-		switchPol[inSwitch] = True	
-		pol = None
-		invPol = None
 		relevantIps = [ip for ip in self.ipToSwitch if self.ipToSwitch[ip] == outSwitch]
+
 		for ip in relevantIps:
-			p = match(dstip=ip) >> fwd(bestPort)
-		 	pol = p if not pol else p + pol
-			p = ~match(dstip=ip) 
-			invPol = p if not invPol else p + invPol
+		 	thisPolicy = if_(match(switch=inSwitch) & match(dstip=ip), fwd(bestPort), thisPolicy)
 
-		if pol and invPol:
-			
-			pol = match(switch=inSwitch) >> pol
-			thisPolicy = pol if not thisPolicy else thisPolicy + pol
-			invPol = match(switch=inSwitch) >> invPol
-			invPolicy = invPol if not invPolicy else invPolicy + invPol
-
-	for switch in self.topology.nodes():
-		if not switch in switchPol:
-			pol = match(switch=switch) if not pol else pol + match(switch=switch)
-		invPolicy = pol if not invPolicy else invPolicy + pol	
 
 	self.reRoutingPolicy = thisPolicy
 	
-	if invPolicy:
-		self.inverseRoutingPolicy = invPolicy 
 	
 
     def registerProbe(self,pkt):
