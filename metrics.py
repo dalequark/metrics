@@ -11,7 +11,7 @@ PROBEIP = IPAddr("1.2.3.0")
 baseip = "1.2.3."
 TIMEOUT = 5
 EWMA = 0.1
-MIGRATE = 1.3
+MIGRATE = 0.7
 PROBE_INTERVAL = 3
 VERBOSE = 1
 MAXVALUE = None 
@@ -73,13 +73,16 @@ class metrics(DynamicPolicy):
 	switch = pkt['switch']
 	ip = pkt['srcip']
 	self.ipToSwitch[ip] = switch
+	self.updateReRoutingPolicy()
+	self.updatePolicy()
  
     def updatePolicy(self):
+	print "Updating policy..."
 	probingPolicy = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
 	# Create rules based on the entries in the pendingResponses Table
 	if self.reRoutingPolicy:	
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy + self.macLearn)
-		#self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reroutingPolicy + (self.inverseRoutingPolicy >> self.macLearn))
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy)
+		#self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy + (self.inverseRoutingPolicy >> self.macLearn))
 	else:
 		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.macLearn)
 
@@ -88,13 +91,13 @@ class metrics(DynamicPolicy):
 	thisPolicy = None
 	# Let macLearner only catch things that are not caught by the routing policy
 	invPolicy = None
+	#print "Updating reroute ... loger is ... ", self.logger
 	for pair in self.logger.switchPairs:
 		pair = self.logger.switchPairs[pair]
 		inSwitch = pair.inSwitch
 		outSwitch = pair.outSwitch
 		bestPort = pair.bestPort
 	
-		print pair	
 		pol = None
 		invPol = None
 		relevantIps = [ip for ip in self.ipToSwitch if self.ipToSwitch[ip] == outSwitch]
@@ -104,24 +107,24 @@ class metrics(DynamicPolicy):
 			p = ~match(dstip=ip) 
 			invPol = p if not invPol else invPol & p
 
-		pol = match(switch=inSwitch) >> pol
-		thisPolicy = pol if not thisPolicy else pol
-		invPol = match(switch=inSwitch) >> invPol
-		invPolicy = match(switch=inSwitch) >> invPol
+		if pol and invPol:
+			pol = match(switch=inSwitch) >> pol
+			thisPolicy = pol if not thisPolicy else pol
+			invPol = match(switch=inSwitch) >> invPol
+			invPolicy = match(switch=inSwitch) >> invPol
 	
+	print "reRoutingPolicy ", thisPolicy	
 	self.reRoutingPolicy = thisPolicy
 	self.inverseRoutingPolicy = invPolicy 
 	
 
     def registerProbe(self,pkt):
 	with self.lock:
-		print "Got probe"
 		self.logger.register(pkt)
 		if self.logger.needsUpdate:
 			self.updateReRoutingPolicy()
 			self.updatePolicy()		
 			self.logger.needsUpdate = False
-			print "Logger is ", self.logger
 
     def probeAll(self):
 
@@ -202,6 +205,7 @@ class probeLogger:
 	def __init__(self, topology):
 		self.topology = topology
 		self.switchPairs = {}	
+		self.currentRoute = {}
 	# Represents every pair of switches a,b (where order matters)
 	class switchPair:
 		def __init__(self, inSwitch, outSwitch):
@@ -209,11 +213,13 @@ class probeLogger:
 			self.outSwitch = outSwitch
 			self.mostRecentSeq = None
 			self.bestPort = None
+			self.bestInterSwitch = None
 			self.probeMetrics = {}	
 			self.counter = 1
 			self.needsUpdate = False
 
-		def addProbe(self,interSwitch,seqNo):
+		def addProbe(self,interSwitch, inPort, seqNo, logger):
+			#print "Adding probe between ", self.inSwitch, " ", self.outSwitch, " through ", interSwitch
 			self.counter += 1
 
 			if seqNo < self.mostRecentSeq:
@@ -221,11 +227,19 @@ class probeLogger:
 			elif seqNo == self.mostRecentSeq:
 				self.probeMetrics[interSwitch] = self.__ewma(interSwitch, self.counter)	
 			else:
+				#print "Got first probe with seq ", seqNo, " from ", self.inSwitch, " to ", self.outSwitch, " through ", interSwitch
 				self.counter = 1
 				self.mostRecentSeq = seqNo
 				self.probeMetrics[interSwitch] = self.__ewma(interSwitch, self.counter)	
-				if not self.bestPort or self.probeMetrics[interSwitch] > MIGRATE*self.probeMetrics[self.bestPort]:
-					self.bestPort = interSwitch
+			
+			if not self.bestPort or self.probeMetrics[interSwitch] < MIGRATE*self.probeMetrics[self.bestInterSwitch]:
+				# avoid creating routing loops
+				otherPair = logger.switchPairs.get((interSwitch, self.outSwitch), None) 
+				if not otherPair or otherPair.bestInterSwitch !=  self.inSwitch:
+					if otherPair and otherPair.bestInterSwitch == self.inSwitch:
+						return	
+					self.bestInterSwitch = interSwitch
+					self.bestPort = inPort 
 					self.needsUpdate = True
 											
 		# Updates metric for route from inswitch to outswitch through interswitch				
@@ -234,11 +248,11 @@ class probeLogger:
 			return metric*EWMA + (1-EWMA)*order
 
 		def __str__(self):
-			return "Pair between " + str(self.inSwitch) +" and " + str(self.outSwitch) + " best port is " +str(self.bestPort)
+			return "Pair between " + str(self.inSwitch) +" and " + str(self.outSwitch) + " best switch is " +str(self.bestInterSwitch)
 
 	def __str__(self):
-		#return str(''.join([self.switchPairs[key] for key in self.switchPairs]))
-		return "dale"
+		return str('\n'.join([str(self.switchPairs[key]) for key in self.switchPairs]))
+	
 	def register(self,pkt):
 		# Figure where this probe came from, who sent it, etc.
 		seqNo = pkt['protocol']
@@ -252,12 +266,11 @@ class probeLogger:
 		# Either get the existing object for this switchPair or make a new one 
 		thisPair = self.switchPairs.get((proberSwitch,responderSwitch), self.switchPair(proberSwitch,responderSwitch))	 	 
 		
-		thisPair.addProbe(interSwitch, seqNo)	
+		thisPair.addProbe(interSwitch, inPort, seqNo, self)	
 		self.switchPairs[(proberSwitch,responderSwitch)] = thisPair
 		if thisPair.needsUpdate:
 			self.needsUpdate = True
 			thisPair.needsUpdate = False		
-		
 		
 def main():
     print "RInitializing ..."
