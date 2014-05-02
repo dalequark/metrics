@@ -37,11 +37,11 @@ class metrics(DynamicPolicy):
 	self.newIpQuery.register_callback(self.registerIp)
 	self.query = packets()
         self.query.register_callback(self.registerProbe) 
-        self.policy = mac_learner()
+        self.macLearn = self.newIpQuery + mac_learner() 
+	self.policy = self.macLearn
         self.floodPolicy = flood()
         self.dropPolicy = drop
-        self.macLearn = self.newIpQuery + mac_learner() 
-        self.metricsPolicy = None
+	self.metricsPolicy = None
 	self.reRoutingPolicy = None	
 	self.inverseRoutingPolicy = None
 	self.testquery = packets()
@@ -68,10 +68,13 @@ class metrics(DynamicPolicy):
             rp = rp.modify(raw='')
             self.network.inject_packet(rp)
 
+
     #Figure out what switch each ip corresponds to (so we can route based on switches)
     def registerIp(self, pkt):
 	switch = pkt['switch']
 	ip = pkt['srcip']
+	print "registering ip ", ip
+	
 	self.ipToSwitch[ip] = switch
 	self.updateReRoutingPolicy()
 	self.updatePolicy()
@@ -80,11 +83,12 @@ class metrics(DynamicPolicy):
 	print "Updating policy..."
 	probingPolicy = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
 	# Create rules based on the entries in the pendingResponses Table
-	if self.reRoutingPolicy:	
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy)
-		#self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy + (self.inverseRoutingPolicy >> self.macLearn))
+	if self.reRoutingPolicy and self.inverseRoutingPolicy:	
+		#self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy >> self.macLearn)
+		#print "Inv ", self.inverseRoutingPolicy
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.reRoutingPolicy + (self.inverseRoutingPolicy  >> self.metricsPolicy))
 	else:
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.macLearn)
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.metricsPolicy)
 
 
     def updateReRoutingPolicy(self):
@@ -92,30 +96,42 @@ class metrics(DynamicPolicy):
 	# Let macLearner only catch things that are not caught by the routing policy
 	invPolicy = None
 	#print "Updating reroute ... loger is ... ", self.logger
+
+	# This is used for creating inverse rules (i.e. filter everything we haven't made rules for (i.e. due to not knowing IP)
+	# to macLearner. switchPol keeps track of which switches we have set rules for
+	switchPol = {}
+
 	for pair in self.logger.switchPairs:
 		pair = self.logger.switchPairs[pair]
 		inSwitch = pair.inSwitch
 		outSwitch = pair.outSwitch
 		bestPort = pair.bestPort
-	
+		switchPol[inSwitch] = True	
 		pol = None
 		invPol = None
 		relevantIps = [ip for ip in self.ipToSwitch if self.ipToSwitch[ip] == outSwitch]
 		for ip in relevantIps:
 			p = match(dstip=ip) >> fwd(bestPort)
-		 	pol = p if not pol else pol + p
+		 	pol = p if not pol else p + pol
 			p = ~match(dstip=ip) 
-			invPol = p if not invPol else invPol & p
+			invPol = p if not invPol else p + invPol
 
 		if pol and invPol:
+			
 			pol = match(switch=inSwitch) >> pol
-			thisPolicy = pol if not thisPolicy else pol
+			thisPolicy = pol if not thisPolicy else thisPolicy + pol
 			invPol = match(switch=inSwitch) >> invPol
-			invPolicy = match(switch=inSwitch) >> invPol
-	
-	print "reRoutingPolicy ", thisPolicy	
+			invPolicy = invPol if not invPolicy else invPolicy + invPol
+
+	for switch in self.topology.nodes():
+		if not switch in switchPol:
+			pol = match(switch=switch) if not pol else pol + match(switch=switch)
+		invPolicy = pol if not invPolicy else invPolicy + pol	
+
 	self.reRoutingPolicy = thisPolicy
-	self.inverseRoutingPolicy = invPolicy 
+	
+	if invPolicy:
+		self.inverseRoutingPolicy = invPolicy 
 	
 
     def registerProbe(self,pkt):
