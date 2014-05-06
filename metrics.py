@@ -37,16 +37,16 @@ class metrics(DynamicPolicy):
 	self.newIpQuery.register_callback(self.registerIp)
 	self.query = packets()
         self.query.register_callback(self.registerProbe) 
-        self.macLearn = self.newIpQuery + mac_learner() 
+        self.macLearn = mac_learner() 
 	self.policy = self.macLearn
         self.floodPolicy = flood()
         self.dropPolicy = drop
 	self.metricsPolicy = None
 	self.reRoutingPolicy = None	
 	self.inverseRoutingPolicy = None
-	self.testquery = packets()
-	if VERBOSE==1:
-		self.testquery.register_callback(self.test)
+	self.testquery = self.newIpQuery #+ packets()
+	#if VERBOSE==1:
+		#self.testquery.register_callback(self.test)
 	
     def test(self, pkt):
 	print "Packet from ", pkt['srcip'], " to ", pkt['dstip'], " at ", pkt['switch']
@@ -84,10 +84,10 @@ class metrics(DynamicPolicy):
 	probingPolicy = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
 	# Create rules based on the entries in the pendingResponses Table
 	if self.reRoutingPolicy:
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + (self.reRoutingPolicy >> self.macLearn))
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, match('11.0.0.0/8') >> self.macLearn, ~match('11.0.0.0/8') >> (self.testquery + (self.reRoutingPolicy >> self.macLearn)))
 		#self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + (self.reRoutingPolicy >> self.metricsPolicy))
 	else:
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + self.macLearn)
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, match('11.0.0.0/8') >> self.macLearn, ~match('11.0.0.0/8') >> self.testquery + self.macLearn)
 
 
     def updateReRoutingPolicy(self):
@@ -142,15 +142,15 @@ class metrics(DynamicPolicy):
 
     
     def set_network(self, network):
-        super(metrics,self).set_network(network)
-		
+	if self.timer:
+            self.timer.cancel()
+        
+	super(metrics,self).set_network(network)
 	self.network = network       
         self.topology = network.topology
       	MAXVALUE = len(self.topology.nodes())
 	self.logger = probeLogger(self.topology)
 
-	if self.timer:
-            self.timer.cancel()
          
         self.pendingResponses = None
         
@@ -158,8 +158,8 @@ class metrics(DynamicPolicy):
 	self.updatePolicy()
  	
 	# restart the probing timer
-        self.timer = Timer(PROBE_INTERVAL, self.probeAll)
-        self.timer.start()    
+	self.timer = Timer(PROBE_INTERVAL, self.probeAll)
+	self.timer.start()    
 
 
     def installInitRules(self):
