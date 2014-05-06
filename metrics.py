@@ -45,6 +45,8 @@ class metrics(DynamicPolicy):
 	self.reRoutingPolicy = None	
 	self.inverseRoutingPolicy = None
 	self.testquery = self.newIpQuery #+ packets()
+	self.test2q = packets()
+	self.test2q.register_callback(self.test)
 	#if VERBOSE==1:
 		#self.testquery.register_callback(self.test)
 	
@@ -84,10 +86,11 @@ class metrics(DynamicPolicy):
 	probingPolicy = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
 	# Create rules based on the entries in the pendingResponses Table
 	if self.reRoutingPolicy:
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, match('11.0.0.0/8') >> self.macLearn, ~match('11.0.0.0/8') >> (self.testquery + (self.reRoutingPolicy >> self.macLearn)))
-		#self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.testquery + (self.reRoutingPolicy >> self.metricsPolicy))
+		p = if_(match(srcip=IPPrefix('10.9.0.0/16')) & match(dstip=IPPrefix('10.9.0.0/16')),  self.macLearn, self.testquery + (self.reRoutingPolicy >> self.macLearn)) 
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, p) 
 	else:
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, match('11.0.0.0/8') >> self.macLearn, ~match('11.0.0.0/8') >> self.testquery + self.macLearn)
+		p = if_(match(srcip=IPPrefix('10.9.0.0/16')) & match(dstip=IPPrefix('10.9.0.0/16')), self.macLearn, self.testquery + self.macLearn) 
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, p)
 
 
     def updateReRoutingPolicy(self):
