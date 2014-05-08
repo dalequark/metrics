@@ -13,7 +13,7 @@ TIMEOUT = 5
 EWMA = 0.3
 MIGRATE = 0.9
 PROBE_INTERVAL = 3
-VERBOSE = 2
+VERBOSE = 1
 MAXVALUE = 7 
 
 class metrics(DynamicPolicy):
@@ -38,14 +38,14 @@ class metrics(DynamicPolicy):
 	self.query = packets()
         self.query.register_callback(self.registerProbe) 
         self.ipRules = None
+	self.directRoute = None
 	self.macLearn = mac_learner() 
-	self.policy = self.macLearn
+	self.policy = drop
         self.floodPolicy = flood()
         self.dropPolicy = drop
 	self.metricsPolicy = None
 	self.reRoutingPolicy = None	
 	self.inverseRoutingPolicy = None
-	self.testquery = self.newIpQuery 
 	self.test2q = packets()
 	self.test3q = packets()
 	self.test4q = packets()
@@ -53,7 +53,7 @@ class metrics(DynamicPolicy):
 	self.test3q.register_callback(self.test)
 	self.test5q = packets()
 	self.test5q.register_callback(self.test3)
-	#self.test2q.register_callback(self.test)
+	self.test2q.register_callback(self.test)
 
 	self.rulesSelfCheck = {}
 
@@ -61,10 +61,12 @@ class metrics(DynamicPolicy):
 	print "had a rule for ", pkt['srcip'], "->", pkt['dstip']
 
     def test3(self,pkt):
-	print "had no rule for ", pkt['srcip'], "->", pkt['dstip']
+	pass#print self.directRoute
 
     def test(self, pkt):
-	if VERBOSE == 2: print "Packet from ", pkt['srcip'], " to ", pkt['dstip'], " at ", pkt['switch']
+	if VERBOSE != 2:
+		return
+	print "Packet from ", pkt['srcip'], " to ", pkt['dstip'], " at ", pkt['switch']
 	try:
 		inSwitch = self.ipToSwitch[pkt['srcip']]
 		outSwitch = self.ipToSwitch[pkt['dstip']]
@@ -98,7 +100,7 @@ class metrics(DynamicPolicy):
 	#print "registering ip ", ip
 	
 	self.ipToSwitch[ip] = switch
-	self.ipRules = drop if not self.ipRules else self.ipRules
+	self.ipRules = self.floodPolicy if not self.ipRules else self.ipRules
 	self.ipRules = if_(match(dstip=ip) & match(switch=switch), fwd(inport), self.ipRules)
 
 	self.updateReRoutingPolicy()
@@ -109,11 +111,11 @@ class metrics(DynamicPolicy):
 	probingPolicy = self.query if not self.metricsPolicy else self.metricsPolicy + self.query
 	# Create rules based on the entries in the pendingResponses Table
 	if self.reRoutingPolicy:
-		p = if_(match(srcip=IPPrefix('10.9.0.0/16')) & match(dstip=IPPrefix('10.9.0.0/16')),  self.test2q + self.macLearn,  self.test3q + self.testquery + (self.reRoutingPolicy)) 
+		p = if_(match(srcip=IPPrefix('10.9.0.0/16')) & match(dstip=IPPrefix('10.9.0.0/16')),  self.test2q + self.newIpQuery + self.directRoute,  self.test3q + self.newIpQuery + (self.reRoutingPolicy)) 
 		self.policy = if_(match(srcip= PROBEIP), probingPolicy, p) 
 	else:
-		p = if_(match(srcip=IPPrefix('10.9.0.0/16')) & match(dstip=IPPrefix('10.9.0.0/16')), self.test2q + self.macLearn, self.test3q + self.testquery) 
-		self.policy = if_(match(srcip= PROBEIP), probingPolicy, p)
+		#p = if_(match(srcip=IPPrefix('10.9.0.0/16')) & match(dstip=IPPrefix('10.9.0.0/16')), self.test2q + self.directRoute, self.test3q + self.newIpQuery) 
+		self.policy = if_(match(srcip= PROBEIP), probingPolicy, self.newIpQuery + drop)
 
 
     def updateReRoutingPolicy(self):
@@ -136,7 +138,14 @@ class metrics(DynamicPolicy):
 			assert inSwitch != outSwitch
 			self.rulesSelfCheck[(inSwitch, outSwitch)] = self.topology.node[inSwitch]['ports'][bestPort].linked_to.switch
 		 	thisPolicy = if_(match(switch=inSwitch) & match(dstip=ip), self.test4q + fwd(bestPort), thisPolicy)
-	
+
+		self.directRoute = self.ipRules
+		for ip in self.ipToSwitch:
+			dstSwitch = self.ipToSwitch[ip]
+			for node in self.topology.nodes():
+				if not dstSwitch == node:
+					directPort = self.switchToPort[node][dstSwitch]
+					self.directRoute = if_(match(dstip=ip) & match(switch=node), fwd(directPort), self.directRoute)	
 		
 	self.reRoutingPolicy = thisPolicy
 	
@@ -312,7 +321,7 @@ class probeLogger:
 		if thisPair.needsUpdate:
 			self.needsUpdate = True
 			thisPair.needsUpdate = False		
-			if VERBOSE == 2: print self	
+			if VERBOSE == 1: print self	
 def main():
     print "RInitializing ..."
     return metrics() 
